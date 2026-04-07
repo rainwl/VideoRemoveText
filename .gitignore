@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Video / media files (inputs & outputs)
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4a
+*.mp3
+*.wav
+
+# Project intermediate work directory
+work/
+
+# Model weights
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.onnx
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
