@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple
@@ -201,14 +203,40 @@ def process_video(
         ffprobe_bin=FFPROBE_BIN,
     )
 
-    progress(0.15, desc="开始处理 (首次会下载约 200MB 模型)...")
-    try:
-        result_path = run_pipeline(cfg)
-    except Exception as e:
-        raise gr.Error(f"处理失败: {e}")
+    progress(0.05, desc="开始处理 (首次会下载约 200MB 模型)...")
 
-    progress(1.0, desc="完成")
-    return result_path
+    # Run the pipeline in a worker thread so we can tick the progress bar.
+    # The pipeline itself is synchronous and emits its own tqdm bars to the
+    # terminal — we just need to keep the browser-side bar visibly alive.
+    result_holder: dict = {}
+
+    def _worker():
+        try:
+            result_holder["path"] = run_pipeline(cfg)
+        except Exception as e:  # noqa: BLE001
+            result_holder["error"] = e
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+    start_ts = time.time()
+    # Animate the bar between 5% and 95% based on a soft estimate so the user
+    # gets feedback. We don't know the true total cost, so we use an asymptote.
+    while t.is_alive():
+        elapsed = time.time() - start_ts
+        # Soft progress: approaches 0.95 but never reaches it until the worker is done.
+        # 60s elapsed → ~0.55, 120s → ~0.78, 240s → ~0.91
+        frac = 0.05 + 0.90 * (1 - 1 / (1 + elapsed / 60.0))
+        progress(frac, desc=f"处理中... 已用时 {int(elapsed)}s (这一步可能要几分钟)")
+        time.sleep(1.0)
+
+    t.join()
+
+    if "error" in result_holder:
+        raise gr.Error(f"处理失败: {result_holder['error']}")
+
+    progress(1.0, desc=f"完成 (用时 {int(time.time() - start_ts)}s)")
+    return result_holder["path"]
 
 
 # ---------------------------------------------------------------------------
