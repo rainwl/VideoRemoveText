@@ -16,10 +16,13 @@ stubbed and ready to plug in).
   merging so a full line of text becomes one mask blob.
 - Simple temporal smoothing (`union` or `vote`) over a sliding window
   to kill flicker and recover the occasional missed frame.
-- Pluggable inpainting backend (`lama` works out of the box;
+- Pluggable inpainting backend (`lama` and `opencv` work out of the box;
   `propainter` / `e2fgvi` stubs included).
 - Original audio is preserved automatically.
 - Preview mode that processes only the first 3 seconds.
+- Faster LaMa path: decode frames directly into memory and only
+  inpaint a tight crop around the subtitle mask instead of the whole
+  frame.
 - Saves intermediate `frames/`, `masks/`, `repaired_frames/` and
   side-by-side `preview/` images for debugging.
 
@@ -96,6 +99,9 @@ python -m app.main \
     --subtitle-color white
 ```
 
+For the fastest non-debug run, add `--no-save-intermediate` so the
+pipeline skips writing mask / preview artifacts.
+
 Pick ROI visually instead:
 
 ```bash
@@ -103,7 +109,8 @@ python -m app.main -i input.mp4 -o output.mp4 --roi-interactive
 ```
 
 A window opens on the first frame; drag a rectangle, press
-**Enter/Space** to confirm.
+**Enter/Space** to confirm. In the web UI, the ROI is controlled by
+two corner points: left-bottom `(x, y)` and right-top `(x, y)`.
 
 Quickly preview the first 3 seconds:
 
@@ -124,6 +131,8 @@ If your subtitles are not being fully removed, the most common fixes:
 - **Black text with thick outlines** → use `--subtitle-color black` and
   raise `--hsv-black-v-max` to `90`, `--hsv-black-s-max` to `110`.
 - **Halo / leftover edges** → increase `--lama-dilate-extra` to `6–8`.
+- **LaMa crops too tightly around subtitles** → increase
+  `--lama-crop-padding` to `64–96`.
 - **Text not connected into single blob** → raise `--merge-distance` to
   `10–14`.
 - **False positives in the background** → narrow the ROI, or switch
@@ -133,10 +142,16 @@ All knobs are listed in `python -m app.main --help`.
 
 ## 4. Switching the inpainting backend
 
-The default is LaMa (image-level, fast, dependency-light):
+The default CLI backend is LaMa (image-level, higher quality):
 
 ```bash
 --backend lama
+```
+
+For a much faster run, use the OpenCV backend:
+
+```bash
+--backend opencv --no-save-intermediate
 ```
 
 The `propainter` and `e2fgvi` choices are wired into the factory but
@@ -174,6 +189,7 @@ the final video.
 | Subtitles partially removed | Lower the RGB threshold (white) or raise it (black); add more `--dilate-iterations` |
 | Background ghosting | Increase `--lama-dilate-extra`; consider switching to a video backend |
 | Flickering between frames | Increase `--temporal-window` to `3–4` |
+| Processing is still too slow | Add `--backend opencv --no-save-intermediate`; if you stay on LaMa, lower `--lama-crop-padding` if the ROI is already tight |
 
 ## 7. Limitations (current implementation)
 

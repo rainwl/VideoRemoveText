@@ -55,10 +55,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--preview-seconds", type=float, default=3.0)
 
     # Backend
-    p.add_argument("--backend", choices=["lama", "propainter", "e2fgvi"], default="lama")
+    p.add_argument("--backend", choices=["lama", "opencv", "propainter", "e2fgvi"], default="lama")
     p.add_argument("--lama-device", default="auto",
                    help="auto / cpu / cuda / mps")
     p.add_argument("--lama-dilate-extra", type=int, default=4)
+    p.add_argument("--lama-crop-padding", type=int, default=48,
+                   help="Extra context pixels around the subtitle bbox when running LaMa.")
+    p.add_argument("--opencv-inpaint-radius", type=float, default=3.0,
+                   help="Inpaint radius for the fast OpenCV backend.")
 
     # Color thresholds
     p.add_argument("--white-rgb-threshold", type=int, default=200)
@@ -121,6 +125,8 @@ def args_to_config(args: argparse.Namespace) -> AppConfig:
         backend=args.backend,
         lama_device=args.lama_device,
         lama_dilate_extra=args.lama_dilate_extra,
+        lama_crop_padding=args.lama_crop_padding,
+        opencv_inpaint_radius=args.opencv_inpaint_radius,
         ffmpeg_bin=args.ffmpeg_bin,
         ffprobe_bin=args.ffprobe_bin,
         output_video_codec=args.codec,

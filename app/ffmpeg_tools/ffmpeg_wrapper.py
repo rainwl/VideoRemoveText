@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from ..models import VideoInfo
 from ..utils.logging_utils import get_logger
 from ..utils.path_utils import ensure_dir, which_or_raise
@@ -143,6 +145,59 @@ def encode_video_from_frames(
         out_video_path,
     ]
     _run(cmd)
+
+
+def encode_video_from_ndarrays(
+    frames: list[np.ndarray],
+    out_video_path: str,
+    fps: float,
+    ffmpeg_bin: str = "ffmpeg",
+    codec: str = "libx264",
+    pix_fmt: str = "yuv420p",
+    crf: int = 18,
+) -> None:
+    if not frames:
+        raise ValueError("frames must not be empty")
+
+    which_or_raise(ffmpeg_bin)
+    ensure_dir(Path(out_video_path).parent)
+
+    first = frames[0]
+    height, width = first.shape[:2]
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s:v", f"{width}x{height}",
+        "-r", f"{fps:.6f}",
+        "-i", "-",
+        "-an",
+        "-c:v", codec,
+        "-pix_fmt", pix_fmt,
+        "-crf", str(crf),
+        out_video_path,
+    ]
+    log.debug("RUN: %s", " ".join(shlex.quote(c) for c in cmd))
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert proc.stdin is not None
+        for frame in frames:
+            if frame.shape[:2] != (height, width):
+                raise ValueError("all frames must have the same size")
+            proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+        proc.stdin.close()
+        stderr = proc.stderr.read() if proc.stderr is not None else b""
+        rc = proc.wait()
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
+
+    if rc != 0:
+        raise RuntimeError(
+            f"Command failed (rc={rc}): {' '.join(cmd)}\n"
+            f"--- stderr ---\n{stderr.decode(errors='ignore')}"
+        )
 
 
 def mux_audio(

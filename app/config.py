@@ -14,7 +14,7 @@ from typing import List, Optional, Tuple
 
 
 SubtitleColor = str  # "white" or "black"
-Backend = str        # "lama" | "propainter" | "e2fgvi"
+Backend = str        # "lama" | "opencv" | "propainter" | "e2fgvi"
 
 
 @dataclass
@@ -66,6 +66,8 @@ class AppConfig:
     backend: Backend = "lama"
     lama_device: str = "auto"            # "auto" | "cpu" | "cuda" | "mps"
     lama_dilate_extra: int = 4           # extra dilation feeding LaMa
+    lama_crop_padding: int = 48          # extra context around subtitle bbox
+    opencv_inpaint_radius: float = 3.0
 
     # ---- FFmpeg -----------------------------------------------------
     ffmpeg_bin: str = "ffmpeg"
@@ -85,10 +87,14 @@ class AppConfig:
             raise ValueError(
                 f"subtitle_color must be 'white' or 'black', got {self.subtitle_color!r}"
             )
-        if self.backend not in ("lama", "propainter", "e2fgvi"):
+        if self.backend not in ("lama", "opencv", "propainter", "e2fgvi"):
             raise ValueError(f"unknown backend {self.backend!r}")
         if self.temporal_window < 0:
             raise ValueError("temporal_window must be >= 0")
+        if self.lama_crop_padding < 0:
+            raise ValueError("lama_crop_padding must be >= 0")
+        if self.opencv_inpaint_radius <= 0:
+            raise ValueError("opencv_inpaint_radius must be > 0")
         if self.roi is not None:
             x, y, w, h = self.roi
             if w <= 0 or h <= 0:

@@ -14,10 +14,13 @@ Run with::
 from __future__ import annotations
 
 import shutil
+import socket
 import tempfile
 import threading
 import time
 import uuid
+import urllib.request
+import webbrowser
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -25,6 +28,7 @@ import cv2
 import gradio as gr
 import numpy as np
 
+from . import __version__
 from .config import AppConfig
 from .pipeline import run_pipeline
 
@@ -88,6 +92,45 @@ def _draw_roi_overlay(frame_rgb: np.ndarray, x: int, y: int, w: int, h: int) -> 
     return img
 
 
+def _corners_to_roi(
+    left_x: int,
+    bottom_y: int,
+    right_x: int,
+    top_y: int,
+    frame_w: int,
+    frame_h: int,
+) -> Tuple[int, int, int, int]:
+    x1 = max(0, min(int(left_x), int(right_x)))
+    x2 = min(frame_w, max(int(left_x), int(right_x)))
+    y1 = max(0, min(int(top_y), int(bottom_y)))
+    y2 = min(frame_h, max(int(top_y), int(bottom_y)))
+    return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
+
+
+def _wait_and_open_browser(url: str, timeout: float = 30.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.0):
+                webbrowser.open(url)
+                return
+        except Exception:
+            time.sleep(0.5)
+
+
+def _find_available_port(preferred: int = 7860, search_span: int = 50) -> int:
+    for port in range(preferred, preferred + search_span):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    raise OSError(f"Cannot find empty port in range: {preferred}-{preferred + search_span - 1}")
+
+
 def _video_dims(video_path: str) -> Tuple[int, int]:
     cap = cv2.VideoCapture(video_path)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
@@ -108,7 +151,7 @@ def on_video_uploaded(video_path: Optional[str]):
             gr.update(maximum=1920, value=0),
             gr.update(maximum=1080, value=0),
             gr.update(maximum=1920, value=1920),
-            gr.update(maximum=1080, value=180),
+            gr.update(maximum=1080, value=900),
             "",
         )
 
@@ -119,33 +162,36 @@ def on_video_uploaded(video_path: Optional[str]):
             gr.update(maximum=1920, value=0),
             gr.update(maximum=1080, value=0),
             gr.update(maximum=1920, value=1920),
-            gr.update(maximum=1080, value=180),
+            gr.update(maximum=1080, value=900),
             "无法读取视频第一帧",
         )
 
     H, W = frame.shape[:2]
     # Default ROI: bottom 18% band, full width
     h_band = max(1, int(H * 0.18))
-    x0, y0, w0, h0 = 0, H - h_band, W, h_band
+    left_x, bottom_y, right_x, top_y = 0, H, W, H - h_band
+    x0, y0, w0, h0 = _corners_to_roi(left_x, bottom_y, right_x, top_y, W, H)
     preview = _draw_roi_overlay(frame, x0, y0, w0, h0)
 
     return (
         preview,
-        gr.update(maximum=W, value=x0),
-        gr.update(maximum=H, value=y0),
-        gr.update(maximum=W, value=w0),
-        gr.update(maximum=H, value=h0),
+        gr.update(maximum=W, value=left_x),
+        gr.update(maximum=H, value=bottom_y),
+        gr.update(maximum=W, value=right_x),
+        gr.update(maximum=H, value=top_y),
         f"视频尺寸: {W} × {H}",
     )
 
 
-def on_roi_changed(video_path: Optional[str], x: int, y: int, w: int, h: int):
+def on_roi_changed(video_path: Optional[str], left_x: int, bottom_y: int, right_x: int, top_y: int):
     if not video_path:
         return None
     frame = _read_first_frame(video_path)
     if frame is None:
         return None
-    return _draw_roi_overlay(frame, x, y, w, h)
+    h, w = frame.shape[:2]
+    x, y, roi_w, roi_h = _corners_to_roi(left_x, bottom_y, right_x, top_y, w, h)
+    return _draw_roi_overlay(frame, x, y, roi_w, roi_h)
 
 
 def on_preset_bottom(video_path: Optional[str]):
@@ -154,19 +200,24 @@ def on_preset_bottom(video_path: Optional[str]):
         return gr.update(), gr.update(), gr.update(), gr.update(), None
     W, H = _video_dims(video_path)
     h_band = max(1, int(H * 0.18))
-    x0, y0, w0, h0 = 0, H - h_band, W, h_band
+    left_x, bottom_y, right_x, top_y = 0, H, W, H - h_band
     frame = _read_first_frame(video_path)
-    preview = _draw_roi_overlay(frame, x0, y0, w0, h0) if frame is not None else None
-    return x0, y0, w0, h0, preview
+    if frame is not None:
+        x0, y0, w0, h0 = _corners_to_roi(left_x, bottom_y, right_x, top_y, W, H)
+        preview = _draw_roi_overlay(frame, x0, y0, w0, h0)
+    else:
+        preview = None
+    return left_x, bottom_y, right_x, top_y, preview
 
 
 def process_video(
     video_path: Optional[str],
-    x: int,
-    y: int,
-    w: int,
-    h: int,
+    left_x: int,
+    bottom_y: int,
+    right_x: int,
+    top_y: int,
     subtitle_color: str,
+    process_mode: str,
     preview_only: bool,
     dilate_iterations: int,
     lama_dilate_extra: int,
@@ -175,8 +226,10 @@ def process_video(
 ):
     if not video_path:
         raise gr.Error("请先上传一个视频")
-    if w <= 0 or h <= 0:
-        raise gr.Error("ROI 宽度和高度必须大于 0")
+    frame_w, frame_h = _video_dims(video_path)
+    x, y, w, h = _corners_to_roi(left_x, bottom_y, right_x, top_y, frame_w, frame_h)
+    if w <= 1 or h <= 1:
+        raise gr.Error("请把左下角和右上角框开，形成有效的字幕区域")
 
     progress(0.05, desc="准备工作目录...")
     request_id = uuid.uuid4().hex[:8]
@@ -196,14 +249,17 @@ def process_video(
         subtitle_color=str(subtitle_color),
         dilate_iterations=int(dilate_iterations),
         temporal_window=int(temporal_window),
-        backend="lama",
+        backend="opencv" if process_mode == "fast" else "lama",
         lama_device="auto",
         lama_dilate_extra=int(lama_dilate_extra),
         ffmpeg_bin=FFMPEG_BIN,
         ffprobe_bin=FFPROBE_BIN,
     )
 
-    progress(0.05, desc="开始处理 (首次会下载约 200MB 模型)...")
+    if process_mode == "fast":
+        progress(0.05, desc="开始处理（速度优先）...")
+    else:
+        progress(0.05, desc="开始处理（质量优先，首次会下载约 200MB 模型）...")
 
     # Run the pipeline in a worker thread so we can tick the progress bar.
     # The pipeline itself is synchronous and emits its own tqdm bars to the
@@ -226,8 +282,8 @@ def process_video(
         elapsed = time.time() - start_ts
         # Soft progress: approaches 0.95 but never reaches it until the worker is done.
         # 60s elapsed → ~0.55, 120s → ~0.78, 240s → ~0.91
-        frac = 0.05 + 0.90 * (1 - 1 / (1 + elapsed / 60.0))
-        progress(frac, desc=f"处理中... 已用时 {int(elapsed)}s (这一步可能要几分钟)")
+        frac = 0.05 + 0.90 * (1 - 1 / (1 + elapsed / 45.0))
+        progress(frac, desc=f"处理中... 已用时 {int(elapsed)}s")
         time.sleep(1.0)
 
     t.join()
@@ -252,6 +308,7 @@ def build_ui() -> gr.Blocks:
             首次运行需要下载约 200 MB 的 AI 模型权重，请耐心等待。
             """
         )
+        gr.Markdown(f"当前界面版本：`v{__version__}`")
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -264,13 +321,14 @@ def build_ui() -> gr.Blocks:
                     interactive=False,
                     height=300,
                 )
+                gr.Markdown("坐标改成两个角点：左下角 `(x, y)` 和右上角 `(x, y)`。")
                 with gr.Row():
                     preset_btn = gr.Button("⬇ 底部 18%（默认）", size="sm")
 
-                x_slider = gr.Slider(0, 1920, value=0, step=1, label="X (左)")
-                y_slider = gr.Slider(0, 1080, value=900, step=1, label="Y (上)")
-                w_slider = gr.Slider(1, 1920, value=1920, step=1, label="宽度")
-                h_slider = gr.Slider(1, 1080, value=180, step=1, label="高度")
+                left_x_slider = gr.Slider(0, 1920, value=0, step=1, label="左下角 X")
+                bottom_y_slider = gr.Slider(0, 1080, value=1080, step=1, label="左下角 Y")
+                right_x_slider = gr.Slider(0, 1920, value=1920, step=1, label="右上角 X")
+                top_y_slider = gr.Slider(0, 1080, value=900, step=1, label="右上角 Y")
 
             with gr.Column(scale=1):
                 gr.Markdown("### 3. 字幕颜色")
@@ -282,6 +340,15 @@ def build_ui() -> gr.Blocks:
                 )
 
                 gr.Markdown("### 4. 运行模式")
+                mode_radio = gr.Radio(
+                    choices=[
+                        ("速度优先（推荐）", "fast"),
+                        ("质量优先（LaMa）", "quality"),
+                    ],
+                    value="fast",
+                    label="处理模式",
+                    info="速度优先会快很多；复杂背景可以切到质量优先",
+                )
                 preview_chk = gr.Checkbox(
                     value=True,
                     label="仅预览前 3 秒（建议先勾选验证效果）",
@@ -313,28 +380,29 @@ def build_ui() -> gr.Blocks:
         video_in.change(
             on_video_uploaded,
             inputs=[video_in],
-            outputs=[roi_preview, x_slider, y_slider, w_slider, h_slider, info_md],
+            outputs=[roi_preview, left_x_slider, bottom_y_slider, right_x_slider, top_y_slider, info_md],
         )
 
-        for s in (x_slider, y_slider, w_slider, h_slider):
+        for s in (left_x_slider, bottom_y_slider, right_x_slider, top_y_slider):
             s.release(
                 on_roi_changed,
-                inputs=[video_in, x_slider, y_slider, w_slider, h_slider],
+                inputs=[video_in, left_x_slider, bottom_y_slider, right_x_slider, top_y_slider],
                 outputs=[roi_preview],
             )
 
         preset_btn.click(
             on_preset_bottom,
             inputs=[video_in],
-            outputs=[x_slider, y_slider, w_slider, h_slider, roi_preview],
+            outputs=[left_x_slider, bottom_y_slider, right_x_slider, top_y_slider, roi_preview],
         )
 
         run_btn.click(
             process_video,
             inputs=[
                 video_in,
-                x_slider, y_slider, w_slider, h_slider,
+                left_x_slider, bottom_y_slider, right_x_slider, top_y_slider,
                 color_radio,
+                mode_radio,
                 preview_chk,
                 dilate_slider,
                 lama_extra_slider,
@@ -351,10 +419,14 @@ def main() -> None:
     print(f"[web] ffmpeg = {FFMPEG_BIN}")
     print(f"[web] ffprobe = {FFPROBE_BIN}")
     demo = build_ui()
+    port = _find_available_port(7860, 50)
+    url = f"http://127.0.0.1:{port}"
+    print(f"[web] url = {url}")
+    threading.Thread(target=_wait_and_open_browser, args=(url,), daemon=True).start()
     demo.queue(max_size=4).launch(
         server_name="127.0.0.1",
-        server_port=7860,
-        inbrowser=True,
+        server_port=port,
+        inbrowser=False,
         share=False,
     )
 
